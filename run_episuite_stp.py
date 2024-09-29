@@ -4,6 +4,7 @@ from pathlib import Path
 import logging
 import pickle
 from tqdm import tqdm
+from skimpy import clean_columns
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -119,52 +120,71 @@ def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1,
 
     return summary_data
 
-# Example usage
-# data = get_episuite_data(cas_rn="000000-00-2", smiles="N1C(C)=C(N(=O)=O)N=C1")
-# print(data)
-
-hls = [1, 3, 10, 30, 100, 10000]
+# Run EPI Suite for multiple halflives
+hls = [0, 1, 3, 10, 30, 100, 10000]
 
 # Read in list of SMILES and CAS RNs from a file (smile_cas.pkl)
-df = pd.read_pickle('smile_cas.pkl')
+df = pd.read_pickle('output/smile_cas.pkl')
 
-# Read in line separated list of CAS RNs from a file (without the line breaks) (cas_rns.txt)
-with open('cas_rns.txt', 'r') as file:
-    cas_rns = file.read().splitlines()
-
-# Pad the CAS RNs with leading zeros to ensure they are 11 characters long
-cas_rns = [cas.rjust(11, '0') for cas in cas_rns]
-
-# Filter the data to only include the CAS RNs in the list and drop dups
-df_filtered = df[df['CASNO'].isin(cas_rns)]
-df_filtered = df_filtered.drop_duplicates()
-
-# Log the number of records to process
-logging.info(f"Processing {len(df_filtered)} records.")
-
-# Run on multiple records
-cas_list = df_filtered['CASNO'].tolist()
-smiles_list = df_filtered['SMILES'].tolist()
+cas_list = df['CASNO'].tolist()
+smiles_list = df['SMILES'].tolist()
 
 # Run on multiple records with progress bar
-data = []
+metadata = pd.DataFrame()
+stp_data = pd.DataFrame()
 for cas, smiles in tqdm(zip(cas_list, smiles_list), total=len(cas_list), desc="Processing EPI Suite Data"):
-    for hl in hls:
-        result = get_episuite_data(cas_rn=cas, smiles=smiles, biowin=False, halflife_hr=hl)
+    for idx, hl in enumerate(hls):
+        if hl == 0:
+            result = get_episuite_data(cas_rn=cas, smiles=smiles, biowin=True)
+        else:
+            result = get_episuite_data(cas_rn=cas, smiles=smiles, biowin=False, halflife_hr=hl)
+        
+        # Clean column names
+        result = clean_columns(result)
+        
+        # Rename 'chem' to 'cas_rn'
+        result.rename(columns={'chem': 'cas_rn'}, inplace=True)
+        
+        # For the first index, extract all of the metadata
+        if idx == 0:
+            # Extract columns that do not start with "STP"
+            metadata_cols = [col for col in result if not col.startswith('stp')]
+            meta_result = result[metadata_cols]
+            metadata = pd.concat([metadata, meta_result], ignore_index=True)
+            
+        # Extract just the 'cas_rn' and 'smiles' columns
+        stp_result = result[['cas_rn', 'smiles']].copy()
+        
         # Add value for bio_a, bio_b, and bio_c as halflife
-        result['bio_p'] = hl*10 # Bio P: the biodegradation half-life (in hours) in the primary clarifier of an STP.
-        result['bio_a'] = hl # Bio A: the biodegradation half-life (in hours) in the aeration vessel of an STP.
-        result['bio_s'] = hl # Bio S: the biodegradation half-life (in hours) in the final settling tank of an STP.
-        # If halflife is 10000, then set `stp_type` to `default` otherwise `custom`
-        result['stp_type'] = 'default' if hl == 10000 else 'custom'
-        data.append(result)
+        stp_result['bio_p'] = hl*10 # Bio P: the biodegradation half-life (in hours) in the primary clarifier of an STP.
+        stp_result['bio_a'] = hl # Bio A: the biodegradation half-life (in hours) in the aeration vessel of an STP.
+        stp_result['bio_s'] = hl # Bio S: the biodegradation half-life (in hours) in the final settling tank of an STP.
+        
+        # If halflife is 0, set `stp_type` to 'biowin', if halflife is 10000, then set `stp_type` to `default` otherwise `custom`
+        stp_result['stp_type'] = 'biowin' if hl == 0 else 'default' if hl == 10000 else 'custom'
+        
+        # Extract columns that start with "STP" and contain the word "percent"
+        stp_cols = [col for col in result if col.startswith('stp') and 'percent' in col]
+        
+        # Convert the columns to numeric
+        result[stp_cols] = result[stp_cols].apply(pd.to_numeric, errors='coerce')
+        
+        # Add the STP columns to the DataFrame
+        stp_result = pd.concat([stp_result, result[stp_cols]], axis=1)
+        
+        # Append the result to the DataFrame
+        stp_data = pd.concat([stp_data, stp_result], ignore_index=True)
 
 logging.info("Finished processing EPI Suite data.")
 
-# Concatenate the list of dataframes into a 
-final_df = pd.concat(data, ignore_index=True)
+# Save the final DataFrames to pickle files
+metadata.to_pickle('output/episuite_meta.pkl')
+stp_data.to_pickle('output/episuite_stp.pkl')
 
-# Save the final DataFrame to an Excel and a pickle file
-final_df.to_pickle('episuite_data.pkl')
-final_df.to_excel('episuite_data.xlsx', index=False)
-final_df.to_csv('episuite_data.csv', index=False)
+# Save the final DataFrames to CSV files
+metadata.to_csv('output/episuite_meta.csv', index=False)
+stp_data.to_csv('output/episuite_stp.csv', index=False)
+
+# Example usage
+# data = get_episuite_data(cas_rn="000000-00-2", smiles="N1C(C)=C(N(=O)=O)N=C1")
+# print(data)
