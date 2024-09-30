@@ -31,14 +31,18 @@ def parse_db_file(file_path, encoding='iso-8859-1'):
 
     return records
 
-# Path to your .DB file
-file_path = 'C:\\EPISUITE41\\SMILECAS.DB'
-parsed_data = parse_db_file(file_path)
+def main():
+    # Path to your .DB file
+    file_path = 'C:\\EPISUITE41\\SMILECAS.DB'
+    parsed_data = parse_db_file(file_path)
 
-# Create a DataFrame from the parsed data
-df = pd.DataFrame(parsed_data)
+    # Create a DataFrame from the parsed data
+    df = pd.DataFrame(parsed_data)
 
-# Write the DataFrame to a csv, an Excel, and a pickle file
-df.to_csv('smile_cas.csv', index=False)
-df.to_excel('smile_cas.xlsx', index=False)
-df.to_pickle('smile_cas.pkl')
+    # Write the DataFrame to a csv, an Excel, and a pickle file
+    df.to_csv('smile_cas.csv', index=False)
+    # df.to_excel('smile_cas.xlsx', index=False)
+    # df.to_pickle('smile_cas.pkl')
+
+if __name__ == "__main__":
+    main()
