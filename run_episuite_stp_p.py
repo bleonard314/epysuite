@@ -5,9 +5,15 @@ import logging
 import pickle
 from tqdm import tqdm
 from skimpy import clean_columns
+import shutil
+import concurrent.futures
+import os
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Define paths for the EPI Suite application and working directories
+ES_DIR = Path("C:/EPISUITE41").resolve()
 
 def update_stp_configuration(biowin, halflife_hr):
     """
@@ -31,10 +37,18 @@ def update_stp_configuration(biowin, halflife_hr):
     return [header] + config_lines
 
 
-def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1, return_df=True, es_dir="C:\\EPISUITE41"):
-    es_dir = Path(es_dir).resolve()
-    app_path = es_dir / "epiwin1.exe"
-    input_fname = "epi_inp.txt"
+def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1, return_df=True, work_dir=None):
+    # Ensure a unique working directory is provided for each run
+    if work_dir is None:
+        raise ValueError("A working directory must be specified for each EPI Suite run to avoid file conflicts.")
+    
+    work_dir = Path(work_dir).resolve()
+    app_path = ES_DIR / "epiwin1.exe"
+    input_fname = work_dir / "epi_inp.txt"
+
+    # Copy the default configuration files into the working directory
+    shutil.copy(ES_DIR / "epi_inp.txt", input_fname)
+    shutil.copy(ES_DIR / "stpvalsx", work_dir / "stpvalsx")
     
     # Read the existing input configuration file
     try:
@@ -48,12 +62,11 @@ def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1,
     if smiles is None:
         # Handle CAS RN lookup for SMILES
         input_lines = ["CAS", cas_rn]
-        with open(es_dir / input_fname, 'w') as file:
+        with open(input_fname, 'w') as file:
             file.write("\n".join(input_lines))
         
         try:
-            subprocess.run([str(app_path), str(input_fname)], cwd=str(es_dir),
-                           timeout=3, check=True)
+            subprocess.run([str(app_path), str(input_fname)], cwd=str(work_dir), timeout=5, check=True)
         except subprocess.TimeoutExpired:
             logging.warning(f"Timeout retrieving SMILES for CAS RN: {cas_rn}")
             return None
@@ -61,41 +74,36 @@ def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1,
             logging.error("Error during EPI Suite execution for CAS RN lookup")
             return None
         
-        # Assume 'cas_res.txt' contains the needed SMILES and additional data
         try:
-            with open(es_dir / "cas_res.txt", 'r') as file:
+            with open(work_dir / "cas_res.txt", 'r') as file:
                 cas_res = file.readlines()
                 input_config[1] = cas_res[0]
                 input_config[2] = cas_res[1]
         except FileNotFoundError:
             logging.error("CAS results file not found.")
             return None
-    elif cas_rn is None:
-        # Set SMILES directly
-        input_config[1] = f"{smiles}\n"
-        input_config[2] = "(null)\n"
     else:
         # Set SMILES and CAS directly
         input_config[1] = f"{smiles}\n"
         input_config[2] = f"{cas_rn}\n"
 
     # Write the updated configuration back to the file
-    with open(es_dir / input_fname, 'w') as file:
+    with open(input_fname, 'w') as file:
         file.writelines(input_config)
     
-    # Read default STP configuration file ('stpvalsx')
-    with open("stpvalsx", 'r') as file:
+    # Update STP configuration
+    stp_config_file = work_dir / "stpvalsx"
+    with open(stp_config_file, 'r') as file:
         stp_config = file.readlines()
 
-    # Handle STP configuration changes
     stp_config[0:3] = update_stp_configuration(biowin, halflife_hr)
     
-    with open(es_dir / "stpvalsx", 'w') as file:
+    with open(stp_config_file, 'w') as file:
         file.writelines(stp_config)
 
     # Run the main EPI Suite application
     try:
-        subprocess.run([str(app_path), str(input_fname)], cwd=str(es_dir), timeout=10, check=True)
+        subprocess.run([str(app_path), str(input_fname)], cwd=str(work_dir), timeout=30, check=True)
     except subprocess.TimeoutExpired:
         logging.warning(f"Timeout retrieving data for: {cas_rn if smiles is None else smiles}")
         return None
@@ -104,7 +112,7 @@ def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1,
         return None
 
     # Process the output
-    summary_file_path = es_dir / "sumbrief.epi"
+    summary_file_path = work_dir / "sumbrief.epi"
     try:
         with open(summary_file_path, 'r') as file:
             summary_raw = [line.strip().split(":") for line in file if line.strip()]
@@ -120,10 +128,52 @@ def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1,
 
     return summary_data
 
-def main():
-    # Run EPI Suite for multiple halflives
+
+# Process each CAS/SMILES pair with multiple halflives
+def process_single_cas_smiles(cas, smiles):
     hls = [0, 1, 3, 10, 30, 100, 10000]
-    
+    # Create a unique working directory for this process
+    work_dir = Path(f"./work_{cas}")
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        stp_data = pd.DataFrame()
+        metadata = pd.DataFrame()
+
+        for idx, hl in enumerate(hls):
+            result = get_episuite_data(cas_rn=cas, smiles=smiles, biowin=(hl == 0), halflife_hr=hl, work_dir=work_dir)
+
+            if result is None:
+                continue  # Skip to the next loop if there was an error
+
+            result = clean_columns(result)
+            result.rename(columns={'chem': 'cas_rn'}, inplace=True)
+
+            if idx == 0:
+                metadata_cols = [col for col in result if not col.startswith('stp')]
+                meta_result = result[metadata_cols]
+                metadata = pd.concat([metadata, meta_result], ignore_index=True)
+
+            stp_result = result[['cas_rn', 'smiles']].copy()
+            stp_result['bio_p'] = hl * 10
+            stp_result['bio_a'] = hl
+            stp_result['bio_s'] = hl
+            stp_result['stp_type'] = 'biowin' if hl == 0 else 'default' if hl == 10000 else 'custom'
+
+            stp_cols = [col for col in result if col.startswith('stp') and 'percent' in col]
+            result[stp_cols] = result[stp_cols].apply(pd.to_numeric, errors='coerce')
+
+            stp_result = pd.concat([stp_result, result[stp_cols]], axis=1)
+            stp_data = pd.concat([stp_data, stp_result], ignore_index=True)
+
+    finally:
+        # Clean up the working directory after processing
+        shutil.rmtree(work_dir)
+
+    return metadata, stp_data
+
+
+def main():
     # Define file name for smile-cas data
     smile_cas_fname = "smile_cas.csv"
 
@@ -163,65 +213,21 @@ def main():
     cas_list = df['CASNO'].tolist()
     smiles_list = df['SMILES'].tolist()
 
-    # Run on multiple records with progress bar
-    metadata = pd.DataFrame()
-    stp_data = pd.DataFrame()
-    for cas, smiles in tqdm(zip(cas_list, smiles_list), total=len(cas_list), desc="Processing EPI Suite Data"):
-        for idx, hl in enumerate(hls):
-            if hl == 0:
-                result = get_episuite_data(cas_rn=cas, smiles=smiles, biowin=True)
-            else:
-                result = get_episuite_data(cas_rn=cas, smiles=smiles, biowin=False, halflife_hr=hl)
-            
-            # Clean column names
-            result = clean_columns(result)
-            
-            # Rename 'chem' to 'cas_rn'
-            result.rename(columns={'chem': 'cas_rn'}, inplace=True)
-            
-            # For the first index, extract all of the metadata
-            if idx == 0:
-                # Extract columns that do not start with "STP"
-                metadata_cols = [col for col in result if not col.startswith('stp')]
-                meta_result = result[metadata_cols]
-                metadata = pd.concat([metadata, meta_result], ignore_index=True)
-                
-            # Extract just the 'cas_rn' and 'smiles' columns
-            stp_result = result[['cas_rn', 'smiles']].copy()
-            
-            # Add value for bio_a, bio_b, and bio_c as halflife
-            stp_result['bio_p'] = hl*10 # Bio P: the biodegradation half-life (in hours) in the primary clarifier of an STP.
-            stp_result['bio_a'] = hl # Bio A: the biodegradation half-life (in hours) in the aeration vessel of an STP.
-            stp_result['bio_s'] = hl # Bio S: the biodegradation half-life (in hours) in the final settling tank of an STP.
-            
-            # If halflife is 0, set `stp_type` to 'biowin', if halflife is 10000, then set `stp_type` to `default` otherwise `custom`
-            stp_result['stp_type'] = 'biowin' if hl == 0 else 'default' if hl == 10000 else 'custom'
-            
-            # Extract columns that start with "STP" and contain the word "percent"
-            stp_cols = [col for col in result if col.startswith('stp') and 'percent' in col]
-            
-            # Convert the columns to numeric
-            result[stp_cols] = result[stp_cols].apply(pd.to_numeric, errors='coerce')
-            
-            # Add the STP columns to the DataFrame
-            stp_result = pd.concat([stp_result, result[stp_cols]], axis=1)
-            
-            # Append the result to the DataFrame
-            stp_data = pd.concat([stp_data, stp_result], ignore_index=True)
+    # Run the processing in parallel
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        results = list(tqdm(executor.map(process_single_cas_smiles, cas_list, smiles_list),
+                            total=len(cas_list), desc="Processing EPI Suite Data"))
 
-    logging.info("Finished processing EPI Suite data.")
+    # Collect results into final DataFrames
+    metadata = pd.concat([result[0] for result in results if result], ignore_index=True)
+    stp_data = pd.concat([result[1] for result in results if result], ignore_index=True)
 
-    # Save the final DataFrames to pickle files
+    # Save the final DataFrames to pickle and CSV files
     metadata.to_pickle('output/episuite_meta.pkl')
     stp_data.to_pickle('output/episuite_stp.pkl')
 
-    # Save the final DataFrames to CSV files
     metadata.to_csv('output/episuite_meta.csv', index=False)
     stp_data.to_csv('output/episuite_stp.csv', index=False)
 
-    # Example usage
-    # data = get_episuite_data(cas_rn="000000-00-2", smiles="N1C(C)=C(N(=O)=O)N=C1")
-    # print(data)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
