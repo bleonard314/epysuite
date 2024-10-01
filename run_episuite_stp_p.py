@@ -47,8 +47,8 @@ def get_episuite_data(cas_rn="71-43-2", smiles=None, biowin=True, halflife_hr=1,
     input_fname = work_dir / "epi_inp.txt"
 
     # Copy the default configuration files into the working directory
-    shutil.copy(ES_DIR / "epi_inp.txt", input_fname)
-    shutil.copy(ES_DIR / "stpvalsx", work_dir / "stpvalsx")
+    shutil.copy("epi_inp.txt", input_fname)
+    shutil.copy("stpvalsx", work_dir / "stpvalsx")
     
     # Read the existing input configuration file
     try:
@@ -184,7 +184,7 @@ def main():
 
     # Read in list of SMILES and CAS RNs from a file
     df = pd.read_csv(smile_cas_fname)
-    
+        
     # Log number of records read
     logging.info(f"Read {len(df)} records from {smile_cas_fname}.")
     
@@ -196,6 +196,9 @@ def main():
         # Read in line separated list of CAS RNs from a file (without the line breaks) (cas_rns.txt)
         with open(cas_rns_fname, 'r') as file:
             cas_rns = file.read().splitlines()
+        
+        # Just use the first 10 CAS RNs for testing
+        cas_rns = cas_rns[:10]
         
         # Display logging message
         logging.info(f"List of CAS RNs to filter found: {cas_rns_fname}; {len(cas_rns)} records.")
@@ -212,15 +215,15 @@ def main():
 
     cas_list = df['CASNO'].tolist()
     smiles_list = df['SMILES'].tolist()
-
+    process_single_cas_smiles(cas_list[0], smiles_list[0])
     # Run the processing in parallel
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        results = list(tqdm(executor.map(process_single_cas_smiles, cas_list, smiles_list),
-                            total=len(cas_list), desc="Processing EPI Suite Data"))
+    # with concurrent.futures.ProcessPoolExecutor() as executor:
+    #     results = list(tqdm(executor.map(process_single_cas_smiles, cas_list, smiles_list),
+    #                         total=len(cas_list), desc="Processing EPI Suite Data"))
 
     # Collect results into final DataFrames
-    metadata = pd.concat([result[0] for result in results if result], ignore_index=True)
-    stp_data = pd.concat([result[1] for result in results if result], ignore_index=True)
+    # metadata = pd.concat([result[0] for result in results if result], ignore_index=True)
+    # stp_data = pd.concat([result[1] for result in results if result], ignore_index=True)
 
     # Save the final DataFrames to pickle and CSV files
     metadata.to_pickle('output/episuite_meta.pkl')
