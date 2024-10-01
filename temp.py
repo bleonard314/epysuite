@@ -72,16 +72,25 @@ def get_episuite_data(cas_rn, smiles):
         logging.error("Error during EPI Suite execution for data processing")
         return None
     
-    # Define path for the tabout file
-    tabout_file_path = es_dir / "tabout.txt"
+    # # Define path for the tabout file
+    # tabout_file_path = es_dir / "tabout.txt"
     
-    # Check if the tabout file exists
-    if not tabout_file_path.exists():
-        logging.error(f"File not found: {tabout_file_path}")
-        return None
+    # # Check if the tabout file exists
+    # if not tabout_file_path.exists():
+    #     logging.error(f"File not found: {tabout_file_path}")
+    #     return None
     
-    # Read the TSV file using Polars
-    tabout_data_df = pl.read_csv(tabout_file_path, separator='\t', truncate_ragged_lines=True)
+    # # Read the TSV file using Polars
+    # tabout_data_df = pl.read_csv(tabout_file_path, separator='\t', truncate_ragged_lines=True)
+    
+    # # Extract columns that start with "STP Total"
+    # stp_columns = [col for col in tabout_data_df.columns if col.startswith("STP")]
+    
+    # # Just keep the first 4 columns
+    # biowin_data_df = tabout_data_df.select(stp_columns[0:4])
+    
+    # # Clean the column names
+    # biowin_data_df = clean_columns(biowin_data_df)
     
     # Define path for the summary file
     summary_file_path = es_dir / "sumbrief.epi"
@@ -100,7 +109,6 @@ def get_episuite_data(cas_rn, smiles):
         stp_config[0:3] = update_stp_configuration(biowin=False, halflife_hr=hl)
         with open(es_dir / "stpvalsx", 'w') as file:
             file.writelines(stp_config)
-        
         try:
             subprocess.run([es_dir / "STPWIN32.exe"], cwd=str(es_dir), timeout=10, check=True)
         except subprocess.TimeoutExpired:
@@ -113,27 +121,63 @@ def get_episuite_data(cas_rn, smiles):
     # Read the summary file
     with open(summary_file_path, 'r') as file:
         lines = file.readlines()
+        lines = [line for line in lines if line.strip()]  # Remove empty lines
     
-    # Initialize a list to hold dictionaries for each half-life
-    summary_data_list = []
+    # Initialize an empty list to collect dictionaries (rows)
+    stp_data_list = []
 
-    # Process the output
+    # Data processing for "biowin" lines
+    biowin_lines = [line for line in lines if line.startswith("STP Total") and "biowin" in line]
+    stp_data = {}
+    for line in biowin_lines:
+        # Create a new dictionary for each row
+        key, value = line.split(":")
+        key = key.strip()
+        key = key.replace("STP Total ", "").replace(" (biowin )", "")  # Clean the key name
+        key = key.lower().replace(" ", "_")  # Convert key name to lowercase and replace spaces with underscores
+        value = float(value)  # Convert the value to a float
+        
+        # Populate row data, including bio_p, bio_a, and bio_s as None initially
+        stp_data['cas_rn'] = cas_rn
+        stp_data['smiles'] = smiles
+        stp_data['bio_p'] = None  # Set as None (compatible with Int64 later)
+        stp_data['bio_a'] = None  # Same for bio_a
+        stp_data['bio_s'] = None  # Same for bio_s
+        stp_data['stp_type'] = 'biowin'
+        stp_data[key] = value  # Dynamically add the key-value pair
+
+    # Append the dictionary to the list
+    stp_data_list.append(stp_data)
+
+    # Process output for half-lives
     for idx, i in enumerate(range(line_count, len(lines), 8)):  # Process in groups of 8 lines
-        # Create a dictionary for the current half-life
-        summary_data = {}
-        
-        # Collect the selected lines in groups of 4 (as per your logic)
-        selected_lines = lines[i:i+4]
+        stp_data = {}  # Create a new dictionary for each row
+
+        # Collect the selected lines in groups of 4 and process them
+        selected_lines = lines[i:i + 4]
         for line in selected_lines:
-            key, value = line.strip().split(":")
-            # Remove "STP Total " from beginning of key name and " (percent)" from end of key name
-            key = key.replace("STP Total ", "").replace(" (percent)", "")
-            summary_data[key] = value
-        
-        # Add the dictionary to the list, each dictionary corresponds to a half-life
-        summary_data_list.append({f"hl-{hls[idx]}": summary_data})
+            key, value = line.split(":")
+            key = key.strip()
+            key = key.replace("STP Total ", "").replace(" (percent)", "")  # Clean the key name
+            key = key.lower().replace(" ", "_")  # Convert key name to lowercase and replace spaces with underscores
+            value = float(value)  # Convert the value to a float
+
+            # Populate row data
+            stp_data['cas_rn'] = cas_rn
+            stp_data['smiles'] = smiles
+            stp_data['bio_p'] = 10000 if hls[idx] == 10000 else hls[idx] * 10
+            stp_data['bio_a'] = hls[idx]
+            stp_data['bio_s'] = hls[idx]
+            stp_data['stp_type'] = 'default' if hls[idx] == 10000 else 'custom'
+            stp_data[key] = value  # Dynamically add the key-value pair
+
+        # Append the dictionary to the list
+        stp_data_list.append(stp_data)
+
+    # Convert the list of dictionaries to a Polars DataFrame
+    stp_data_df = pl.DataFrame(stp_data_list)
     
-    return tabout_data_df, summary_data_list
+    return stp_data_df
 
 def main():
     tabout_path = Path(ES_DIR).resolve() / "tabout.txt"
@@ -174,10 +218,9 @@ def main():
 
         # Pad the CAS RNs with leading zeros to ensure they are 11 characters long
         cas_rns = [cas.rjust(11, '0') for cas in cas_rns]
-
-        # Filter the data to only include the CAS RNs in the list and drop dups
+        
+        # Filter the data to only include the CAS RNs in the list
         df = df[df['CASNO'].isin(cas_rns)]
-        df = df.drop_duplicates()
 
     # Log the number of records to process
     logging.info(f"Processing {len(df)} records.")
@@ -186,26 +229,15 @@ def main():
     smiles_list = df['SMILES'].tolist()
 
     # Run on multiple records with progress bar
-    meta_list = []
-    stp_list = []
+    stp_df = pl.DataFrame()
     for cas, smiles in tqdm(zip(cas_list, smiles_list), total=len(cas_list), desc="Processing EPI Suite Data"):
-        meta, stp = get_episuite_data(cas_rn=cas, smiles=smiles)
-        meta_list.append(meta)
-        stp_list.append(stp)
+        stp = get_episuite_data(cas_rn=cas, smiles=smiles)
+        stp_df = stp_df.vstack(stp)
 
     logging.info("Finished processing EPI Suite data.")
-
-    # Save the final DataFrames to pickle files
-    # metadata.to_pickle('output/episuite_meta.pkl')
-    # stp_data.to_pickle('output/episuite_stp.pkl')
-
-    # # Save the final DataFrames to CSV files
-    # metadata.to_csv('output/episuite_meta.csv', index=False)
-    # stp_data.to_csv('output/episuite_stp.csv', index=False)
-
-    # Example usage
-    # data = get_episuite_data(cas_rn="000000-00-2", smiles="N1C(C)=C(N(=O)=O)N=C1")
-    # print(data)
+    
+    # Write the final DataFrame to a CSV file
+    stp_df.to_csv('output/episuite_stp.csv')
 
 if __name__ == "__main__":
     main()
